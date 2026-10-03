@@ -1,0 +1,9 @@
+main.json
+parameters.prod.json
+*.local.txt
+*.local.json
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db

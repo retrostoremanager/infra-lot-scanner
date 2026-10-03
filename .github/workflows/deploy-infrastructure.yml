@@ -1,0 +1,81 @@
+name: Deploy lot-scanner Infrastructure
+
+on:
+  push:
+    branches:
+      - development
+  workflow_dispatch:
+
+concurrency:
+  group: lot-scanner-infra-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create resource group
+      run: |
+        az group create --name lot-scanner-rg-dev --location eastus --output none 2>/dev/null || true
+        echo "Resource group ready."
+
+    - name: Deploy Bicep Template
+      uses: azure/arm-deploy@v1
+      with:
+        subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        resourceGroupName: lot-scanner-rg-dev
+        template: ./main.bicep
+        parameters: >-
+          ./parameters.dev.json
+          anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}
+          jwtAuthenticationSecretKey=${{ secrets.JWT_AUTHENTICATION_SECRET_KEY }}
+          ghActionsServicePrincipalObjectId=${{ secrets.GH_ACTIONS_SP_OBJECT_ID }}
+        deploymentName: lot-scanner-infra-dev-${{ github.run_number }}
+
+    - name: Wait for RBAC propagation
+      run: sleep 30
+      if: success()
+
+    # The lotscanner Postgres connection string needs gamedb's existing server admin
+    # password (a secret infra-gamedb already holds) interpolated into a connection
+    # string -- same reason infra-gamedb sets GameDbConnectionString via script rather
+    # than inline Bicep. AnthropicApiKey/JwtAuthenticationSecretKey are set directly by
+    # the Bicep template itself (see main.bicep) since they need no interpolation.
+    - name: Sync lotscanner connection string to Key Vault and Function App
+      env:
+        POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+      run: |
+        set -e
+        KV_NAME="lot-scanner-kv-dev"
+        PG_HOST="gamedb-postgres-dev.postgres.database.azure.com"
+        PG_DB="lotscanner-dev"
+        PG_USER="sqladmin"
+        CONN_STR="Host=${PG_HOST};Port=5432;Database=${PG_DB};Username=${PG_USER};Password=${POSTGRES_ADMIN_PASSWORD};SSL Mode=Require"
+
+        echo "Updating LotScannerDbConnectionString in Key Vault..."
+        az keyvault secret set --vault-name "$KV_NAME" --name "LotScannerDbConnectionString" \
+          --value "$CONN_STR" --output none
+
+        echo "Setting ConnectionStrings__lotscanner on Function App (Key Vault refs may not resolve in isolated worker)..."
+        az functionapp config appsettings set -g lot-scanner-rg-dev -n lot-scanner-func-dev \
+          --settings "ConnectionStrings__lotscanner=$CONN_STR" --output none
+        echo "Connection string configured."
+
+    - name: Restart Function App
+      run: |
+        az functionapp restart --name lot-scanner-func-dev --resource-group lot-scanner-rg-dev --output none
+        echo "Function App restarted."
+
+    - name: Deployment Complete
+      run: |
+        echo "lot-scanner infrastructure deployed successfully!"
+        echo "Function App: https://lot-scanner-func-dev.azurewebsites.net"
