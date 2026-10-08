@@ -98,13 +98,20 @@ resource jwtAuthenticationSecretKeySecret 'Microsoft.KeyVault/vaults/secrets@202
   }
 }
 
-// Function App Service Plan - Consumption
+// Function App Service Plan - Consumption, Linux.
+// Windows Consumption's placeholder pool only has .NET 6/8 isolated-worker images
+// available (confirmed via the live event log: IIS tried to specialize a
+// DOTNET-ISOLATED_8.0/6.0 placeholder and it shut down immediately on every request).
+// Linux Consumption picks up new isolated-worker runtimes faster, so this is what
+// actually lets fn-lot-scanner run on .NET 10 as chosen, rather than downgrading.
 resource functionAppServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
   name: functionAppServicePlanName
   location: location
   tags: tags
   kind: 'functionapp'
-  properties: {}
+  properties: {
+    reserved: true
+  }
   sku: {
     name: 'Y1'
     tier: 'Dynamic'
@@ -116,10 +123,11 @@ resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   name: functionAppName
   location: location
   tags: tags
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   properties: {
     serverFarmId: functionAppServicePlan.id
     siteConfig: {
+      linuxFxVersion: 'DOTNET-ISOLATED|10.0'
       cors: {
         allowedOrigins: concat(['http://localhost:7071'], additionalCorsOrigins)
         supportCredentials: false
@@ -144,8 +152,13 @@ var functionAppSettings = {
   FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
   ASPNETCORE_ENVIRONMENT: environment
   ConnectionStrings__lotscanner: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/LotScannerDbConnectionString/)'
-  Anthropic__ApiKey: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/AnthropicApiKey/)'
-  JwtAuthentication__SecretKey: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/JwtAuthenticationSecretKey/)'
+  // Set directly rather than as a Key Vault reference -- isolated-worker Function Apps
+  // don't reliably resolve @Microsoft.KeyVault(...) app settings at runtime (same
+  // gotcha infra-gamedb/infra-mystore already hit for their connection strings; this
+  // avoids it for these two instead of adding more post-deploy sync-script steps). The
+  // values still live in Key Vault too (see the secret resources above) for visibility.
+  Anthropic__ApiKey: anthropicApiKey
+  JwtAuthentication__SecretKey: jwtAuthenticationSecretKey
   ApiGamedb__BaseUrl: gamedbFunctionAppUrl
   Blob__ConnectionString: storageConnectionString
   Blob__ContainerName: 'lot-scan-photos'
