@@ -143,7 +143,7 @@ var functionAppSettings = {
   FUNCTIONS_EXTENSION_VERSION: '~4'
   FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
   ASPNETCORE_ENVIRONMENT: environment
-  'ConnectionStrings__lotscanner': '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/LotScannerDbConnectionString/)'
+  ConnectionStrings__lotscanner: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/LotScannerDbConnectionString/)'
   Anthropic__ApiKey: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/AnthropicApiKey/)'
   JwtAuthentication__SecretKey: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/JwtAuthenticationSecretKey/)'
   ApiGamedb__BaseUrl: gamedbFunctionAppUrl
