@@ -146,8 +146,12 @@ var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${stor
 
 var functionAppSettings = {
   AzureWebJobsStorage: storageConnectionString
-  WEBSITE_CONTENTAZUREFILECONNECTIONSTRING: storageConnectionString
-  WEBSITE_CONTENTSHARE: toLower(functionAppName)
+  // Deliberately NOT setting WEBSITE_CONTENTAZUREFILECONNECTIONSTRING/WEBSITE_CONTENTSHARE
+  // here -- those are Windows/Azure-Files content-sync settings (copied from
+  // infra-gamedb's Windows pattern originally) that don't apply to this Linux
+  // Consumption app and were removed during live debugging of a persistent deploy
+  // failure (see git log / memory for the full investigation -- still unresolved as of
+  // 2026-10-09, but these specific settings are confirmed not needed either way).
   FUNCTIONS_EXTENSION_VERSION: '~4'
   FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
   ASPNETCORE_ENVIRONMENT: environment

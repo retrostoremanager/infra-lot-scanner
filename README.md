@@ -69,9 +69,24 @@ true` means nobody gets implicit access, not even the deployer, until a role is 
 
 ## Status
 
-Redeploying to Linux Consumption as of 2026-10-08 (see above) after discovering Windows
-Consumption can't yet run a .NET 10 isolated worker here. `lotscanner-dev`'s schema is
-already applied directly via `db-lot-scanner/migrations/`. Once the Linux redeploy is
-confirmed working, `app-lot-scanner` (the frontend) still needs
-`EXPO_PUBLIC_API_BASE_URL` pointed at this Function App and a real employee login flow
+**Function App deploy still unresolved as of 2026-10-09.** Key Vault, Storage, and the
+Linux Consumption plan/app resources all deploy cleanly via this repo's Bicep.
+`lotscanner-dev`'s schema is live (`db-lot-scanner/migrations/`, applied directly).
+But getting `fn-lot-scanner`'s actual code running on `lot-scanner-func-dev` has not
+succeeded despite five distinct attempts (Kudu zip-push via `az functionapp deployment
+source config-zip`, `az functionapp deploy`, `WEBSITE_RUN_FROM_PACKAGE` pointed at a
+blob SAS URL, each retried across both .NET 9 and .NET 10 `linuxFxVersion` settings).
+The site/SCM oscillates between `503`, `401`, and (briefly, once, with a minimal .NET 9
+test function) a live-but-empty host — never converging to a stable working state. This
+does not look like a config problem at this point; see the session's full writeup in
+project memory (`project_lot_scanner.md`) for the complete blow-by-blow.
+
+**Before debugging this further**: consider deleting `lot-scanner-func-dev` and
+`lot-scanner-func-plan-dev` and letting this repo's Bicep recreate them from a clean
+slate, in case the resource itself is in a bad state from the many config changes made
+during live troubleshooting. If that doesn't help, this is probably worth an Azure
+support ticket.
+
+Once the Function App is actually serving requests, `app-lot-scanner` (the frontend)
+still needs `EXPO_PUBLIC_API_BASE_URL` pointed at it and a real employee login flow
 before an actual device can use it end-to-end.
