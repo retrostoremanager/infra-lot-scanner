@@ -98,20 +98,25 @@ resource jwtAuthenticationSecretKeySecret 'Microsoft.KeyVault/vaults/secrets@202
   }
 }
 
-// Function App Service Plan - Consumption, Linux.
-// Windows Consumption's placeholder pool only has .NET 6/8 isolated-worker images
-// available (confirmed via the live event log: IIS tried to specialize a
-// DOTNET-ISOLATED_8.0/6.0 placeholder and it shut down immediately on every request).
-// Linux Consumption picks up new isolated-worker runtimes faster, so this is what
-// actually lets fn-lot-scanner run on .NET 10 as chosen, rather than downgrading.
+// Function App Service Plan - Consumption, Windows.
+// Tried Linux Consumption first (2026-10-08/09) to work around Windows Consumption's
+// .NET 10 isolated-worker placeholder gap (IIS tried to specialize a
+// DOTNET-ISOLATED_8.0/6.0 placeholder and crashed immediately). That turned out to be
+// the wrong call: this subscription had NEVER run a Linux Consumption Function App
+// before, and every Linux attempt (including a fully isolated test in a different
+// region with a brand-new storage account, created via az functionapp create instead
+// of Bicep) failed identically -- ARM reports "Running" but every HTTP request 503s,
+// while this subscription's existing Windows Consumption apps (gamedb, mystore) all
+// respond instantly. Reverting to Windows, which is proven reliable here, and retrying
+// .NET 10 on Windows -- placeholder availability can change day to day, worth another
+// shot before giving up .NET 10 entirely. See project memory / git history for the
+// full investigation.
 resource functionAppServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
   name: functionAppServicePlanName
   location: location
   tags: tags
   kind: 'functionapp'
-  properties: {
-    reserved: true
-  }
+  properties: {}
   sku: {
     name: 'Y1'
     tier: 'Dynamic'
@@ -123,11 +128,10 @@ resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   name: functionAppName
   location: location
   tags: tags
-  kind: 'functionapp,linux'
+  kind: 'functionapp'
   properties: {
     serverFarmId: functionAppServicePlan.id
     siteConfig: {
-      linuxFxVersion: 'DOTNET-ISOLATED|10.0'
       cors: {
         allowedOrigins: concat(['http://localhost:7071'], additionalCorsOrigins)
         supportCredentials: false
@@ -146,12 +150,10 @@ var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${stor
 
 var functionAppSettings = {
   AzureWebJobsStorage: storageConnectionString
-  // Deliberately NOT setting WEBSITE_CONTENTAZUREFILECONNECTIONSTRING/WEBSITE_CONTENTSHARE
-  // here -- those are Windows/Azure-Files content-sync settings (copied from
-  // infra-gamedb's Windows pattern originally) that don't apply to this Linux
-  // Consumption app and were removed during live debugging of a persistent deploy
-  // failure (see git log / memory for the full investigation -- still unresolved as of
-  // 2026-10-09, but these specific settings are confirmed not needed either way).
+  // Windows Consumption content-sync settings -- required here (unlike Linux
+  // Consumption), matching infra-gamedb/infra-mystore's working pattern.
+  WEBSITE_CONTENTAZUREFILECONNECTIONSTRING: storageConnectionString
+  WEBSITE_CONTENTSHARE: toLower(functionAppName)
   FUNCTIONS_EXTENSION_VERSION: '~4'
   FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
   ASPNETCORE_ENVIRONMENT: environment
