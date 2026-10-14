@@ -70,14 +70,27 @@ true` means nobody gets implicit access, not even the deployer, until a role is 
 
 ## Status
 
-Reverted to Windows Consumption as of 2026-10-13 (see above) after Linux Consumption
-proved unworkable on this subscription. `lotscanner-dev`'s schema is live
-(`db-lot-scanner/migrations/`, applied directly). About to redeploy on Windows + .NET
-10 and retest — if Windows still can't find a .NET 10 placeholder, next fallback is
-downgrading `fn-lot-scanner`'s dependencies to .NET 9 (requires updating
-`EFCore.NamingConventions`/`Npgsql.EntityFrameworkCore.PostgreSQL` to 9.x-compatible
-versions).
+**Live and working on Windows Consumption + .NET 10 as of 2026-10-14.** The entire
+Linux-Consumption detour (2026-10-08/09) and the "maybe it's a platform/subscription
+issue" investigation that followed were chasing a red herring: the real blocker was a
+bug in the *test tooling* used to validate the deployment, not in this infrastructure or
+in `fn-lot-scanner`'s code. A hand-rolled JWT-minting script written on Windows left a
+raw `\r` (carriage return) embedded at the end of every test Bearer token (`dotnet run >
+token.txt` writes CRLF; `tr -d '\n'` only stripped the LF). An embedded CR inside an HTTP
+header value is invalid and gets rejected — producing a blank `400 Bad Request` on
+*every* request that included that token, which looked exactly like a platform-level
+rejection. Confirmed by testing the same malformed token against `fn-mystore`'s proven,
+long-running production app — it showed the identical blank `400`. Fixing the test
+script (`tr -d '\r\n'` instead of `tr -d '\n'`) immediately revealed the app was working
+correctly: `GET /api/lot-scans/{nonexistent-id}` returns the correct `404`, auth/routing
+all function as designed on the first real, cleanly-tested Windows + .NET 10 deploy.
 
-Once the Function App is actually serving requests, `app-lot-scanner` (the frontend)
-still needs `EXPO_PUBLIC_API_BASE_URL` pointed at it and a real employee login flow
-before an actual device can use it end-to-end.
+Separately confirmed (unrelated to this app): `api-gamedb`'s own `/api/games` and
+`/api/pricing/lookup` endpoints 500 directly when queried, with no lot-scanner code in
+the path — `/api/health` reports its DB as connected, but any real query fails. This
+will block `fn-lot-scanner`'s catalog-search proxy specifically, but is a pre-existing
+`api-gamedb` bug to fix in that repo, not here.
+
+`app-lot-scanner` (the frontend) still needs `EXPO_PUBLIC_API_BASE_URL` pointed at
+`https://lot-scanner-func-dev.azurewebsites.net` and a real employee login flow before
+an actual device can use it end-to-end.
