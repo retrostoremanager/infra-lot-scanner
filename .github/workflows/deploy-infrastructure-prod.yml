@@ -39,10 +39,14 @@ jobs:
         resourceGroupName: lot-scanner-rg-prod
         template: ./main.bicep
         parameters: >-
-          ./parameters.prod.json
+          environment=prod
+          location=eastus
+          appName=lot-scanner
+          gamedbAppName=gamedb
           anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}
           jwtAuthenticationSecretKey=${{ secrets.JWT_AUTHENTICATION_SECRET_KEY_PROD }}
           ghActionsServicePrincipalObjectId=${{ secrets.GH_ACTIONS_SP_OBJECT_ID }}
+          tags={"Environment":"Production","Project":"lot-scanner","ManagedBy":"Bicep"}
         deploymentName: lot-scanner-infra-prod-${{ github.run_number }}
 
     - name: Wait for RBAC propagation
