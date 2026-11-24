@@ -1,0 +1,135 @@
+name: Migrate to Flex Consumption Prod (temp)
+
+# lot-scanner-func-prod is on Windows Consumption (Y1), same architecture class as
+# mystore-func-prod was before its migration earlier today. Migrating to Flex
+# Consumption (Linux) for the same reasons: different underlying infrastructure,
+# Microsoft's current recommended tier. This captures the exact live app settings
+# first (rather than reconstructing from Bicep, which may drift from what's actually
+# deployed), deletes and recreates on Flex, then deploys via Azure Functions Core
+# Tools -- the only deploy method confirmed to work for Flex Consumption + .NET
+# isolated in this subscription.
+on:
+  workflow_dispatch:
+
+env:
+  RG: lot-scanner-rg-prod
+  FUNC_NAME: lot-scanner-func-prod
+  KV_NAME: lot-scanner-kv-prod
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install Azure Functions Core Tools
+      run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+    - name: Capture current live app settings and CORS
+      run: |
+        az functionapp config appsettings list --name "$FUNC_NAME" --resource-group "$RG" -o json > /tmp/current-settings.json
+        cat /tmp/current-settings.json
+        az functionapp cors show --name "$FUNC_NAME" --resource-group "$RG" -o json > /tmp/current-cors.json || echo '{}' > /tmp/current-cors.json
+        cat /tmp/current-cors.json
+
+    - name: Delete existing (Windows Consumption) Function App
+      run: |
+        az functionapp delete --name "$FUNC_NAME" --resource-group "$RG"
+
+    - name: Create Flex Consumption Function App (Linux)
+      run: |
+        STORAGE=$(az storage account list --resource-group "$RG" --query "[0].name" -o tsv)
+        echo "Using storage account: $STORAGE"
+        az functionapp create \
+          --name "$FUNC_NAME" \
+          --resource-group "$RG" \
+          --storage-account "$STORAGE" \
+          --flexconsumption-location eastus \
+          --runtime dotnet-isolated \
+          --runtime-version 10.0 \
+          --output json
+
+    - name: Assign system-managed identity
+      run: az functionapp identity assign --name "$FUNC_NAME" --resource-group "$RG" --output none
+
+    - name: Grant new identity Key Vault access
+      run: |
+        PRINCIPAL_ID=$(az functionapp identity show --name "$FUNC_NAME" --resource-group "$RG" --query principalId -o tsv)
+        echo "New identity principalId: $PRINCIPAL_ID"
+        KV_SCOPE=$(az keyvault show --name "$KV_NAME" --query id -o tsv)
+        az role assignment create \
+          --assignee-object-id "$PRINCIPAL_ID" \
+          --assignee-principal-type ServicePrincipal \
+          --role "Key Vault Secrets User" \
+          --scope "$KV_SCOPE"
+
+    - name: Wait for RBAC propagation
+      run: sleep 30
+
+    - name: Restore app settings from captured snapshot
+      run: |
+        python3 -c "
+        import json
+        with open('/tmp/current-settings.json') as f:
+            settings = json.load(f)
+        pairs = []
+        skip = {'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', 'WEBSITE_CONTENTSHARE', 'AzureWebJobsStorage'}
+        for s in settings:
+            if s['name'] in skip:
+                continue
+            val = s['value'].replace('\"', '\\\\\"')
+            pairs.append(f'\"{s[\"name\"]}={val}\"')
+        print(' '.join(pairs))
+        " > /tmp/settings_args.txt
+        eval "az functionapp config appsettings set -g \"$RG\" -n \"$FUNC_NAME\" --settings $(cat /tmp/settings_args.txt) --output none"
+
+    - name: Restore CORS
+      run: |
+        python3 -c "
+        import json
+        with open('/tmp/current-cors.json') as f:
+            cors = json.load(f)
+        origins = cors.get('allowedOrigins', [])
+        print(' '.join(f'\"{o}\"' for o in origins))
+        " > /tmp/cors_origins.txt
+        if [ -s /tmp/cors_origins.txt ]; then
+          eval "az functionapp cors add -g \"$RG\" -n \"$FUNC_NAME\" --allowed-origins $(cat /tmp/cors_origins.txt) --output none"
+        fi
+
+    - name: Clone fn-lot-scanner master
+      run: git clone --depth 1 --branch master https://github.com/retrostoremanager/fn-lot-scanner.git /tmp/fn-lot-scanner
+
+    - name: Build fn-lot-scanner
+      working-directory: /tmp/fn-lot-scanner
+      run: |
+        dotnet restore fn-lot-scanner.csproj --runtime linux-x64
+        dotnet build fn-lot-scanner.csproj --configuration Release --no-restore
+
+    - name: Publish with Azure Functions Core Tools
+      working-directory: /tmp/fn-lot-scanner
+      run: func azure functionapp publish "$FUNC_NAME" --dotnet-isolated
+
+    - name: Wait and verify functions registered (no simple health route exists here)
+      run: |
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          sleep 20
+          COUNT=$(az functionapp function list --name "$FUNC_NAME" --resource-group "$RG" --query "length([?name!='$FUNC_NAME/WarmUp'])" -o tsv 2>/dev/null || echo "0")
+          echo "Attempt $i: $COUNT real functions registered"
+          if [ "$COUNT" -gt "0" ]; then
+            echo "Functions registered successfully."
+            az functionapp function list --name "$FUNC_NAME" --resource-group "$RG" -o table
+            exit 0
+          fi
+        done
+        echo "Functions never registered beyond the WarmUp placeholder."
+        exit 1
