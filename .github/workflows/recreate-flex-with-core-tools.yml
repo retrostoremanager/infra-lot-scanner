@@ -1,0 +1,120 @@
+name: Recreate Function App (Flex Consumption)
+
+# lot-scanner-func-prod runs on Flex Consumption (Linux) as of 2026-11-24, migrated off
+# classic Windows Consumption (Y1) after that host runtime proved unable to reliably
+# specialize .NET 9/10 isolated-worker apps on this subscription's scale unit (same
+# issue hit mystore-func-prod the same day -- see infra-mystore's main.bicep history
+# for the full investigation). Flex Consumption's Bicep resource shape is comparatively
+# immature, so the Function App itself is provisioned via the CLI, not Bicep (main.bicep
+# references it as an `existing` resource and manages everything around it).
+#
+# Flex Consumption's deployment model is also not classic Kudu zip-deploy: az
+# functionapp deployment source config-zip, az functionapp deploy (OneDeploy preview),
+# and Azure/functions-action were all confirmed to silently no-op against it (the
+# function list stays stuck on the system WarmUp placeholder). Azure Functions Core
+# Tools (func azure functionapp publish) is the only method confirmed to work.
+#
+# Use this workflow only to fully recreate the app from scratch (e.g. after an outage
+# forces deletion). For routine code deploys, use fn-lot-scanner's own
+# deploy-function-app-prod.yml instead.
+on:
+  workflow_dispatch:
+
+env:
+  RG: lot-scanner-rg-prod
+  FUNC_NAME: lot-scanner-func-prod
+  KV_NAME: lot-scanner-kv-prod
+
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Install Azure Functions Core Tools
+      run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+    - name: Create Flex Consumption Function App (Linux)
+      run: |
+        STORAGE=$(az storage account list --resource-group "$RG" --query "[0].name" -o tsv)
+        az functionapp create \
+          --name "$FUNC_NAME" \
+          --resource-group "$RG" \
+          --storage-account "$STORAGE" \
+          --flexconsumption-location eastus \
+          --runtime dotnet-isolated \
+          --runtime-version 10 \
+          --output json
+
+    - name: Assign system-managed identity
+      run: az functionapp identity assign --name "$FUNC_NAME" --resource-group "$RG" --output none
+
+    - name: Grant new identity Key Vault access
+      run: |
+        PRINCIPAL_ID=$(az functionapp identity show --name "$FUNC_NAME" --resource-group "$RG" --query principalId -o tsv)
+        KV_SCOPE=$(az keyvault show --name "$KV_NAME" --query id -o tsv)
+        az role assignment create \
+          --assignee-object-id "$PRINCIPAL_ID" \
+          --assignee-principal-type ServicePrincipal \
+          --role "Key Vault Secrets User" \
+          --scope "$KV_SCOPE"
+
+    - name: Wait for RBAC propagation
+      run: sleep 30
+
+    - name: Deploy Bicep (re-applies app settings, Key Vault, storage, RBAC to the now-existing app)
+      uses: azure/arm-deploy@v1
+      with:
+        subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        resourceGroupName: ${{ env.RG }}
+        template: ./main.bicep
+        parameters: >-
+          environment=prod
+          location=eastus
+          appName=lot-scanner
+          gamedbAppName=gamedb
+          anthropicApiKey=${{ secrets.ANTHROPIC_API_KEY }}
+          jwtAuthenticationSecretKey=${{ secrets.JWT_AUTHENTICATION_SECRET_KEY_PROD }}
+          ghActionsServicePrincipalObjectId=${{ secrets.GH_ACTIONS_SP_OBJECT_ID }}
+        deploymentName: lot-scanner-infra-prod-recreate-${{ github.run_number }}
+
+    - name: Set CORS
+      run: |
+        az functionapp cors add -g "$RG" -n "$FUNC_NAME" --allowed-origins "http://localhost:7071" --output none
+
+    - name: Clone fn-lot-scanner master
+      run: git clone --depth 1 --branch master https://github.com/retrostoremanager/fn-lot-scanner.git /tmp/fn-lot-scanner
+
+    - name: Build fn-lot-scanner
+      working-directory: /tmp/fn-lot-scanner
+      run: |
+        dotnet restore fn-lot-scanner.csproj --runtime linux-x64
+        dotnet build fn-lot-scanner.csproj --configuration Release --no-restore
+
+    - name: Publish with Azure Functions Core Tools
+      working-directory: /tmp/fn-lot-scanner
+      run: func azure functionapp publish "$FUNC_NAME" --dotnet-isolated
+
+    - name: Wait and verify functions registered
+      run: |
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          sleep 20
+          COUNT=$(az functionapp function list --name "$FUNC_NAME" --resource-group "$RG" --query "length([?name!='$FUNC_NAME/WarmUp'])" -o tsv 2>/dev/null || echo "0")
+          echo "Attempt $i: $COUNT real functions registered"
+          if [ "$COUNT" -gt "0" ]; then
+            echo "Functions registered successfully."
+            exit 0
+          fi
+        done
+        echo "Functions never registered beyond the WarmUp placeholder."
+        exit 1

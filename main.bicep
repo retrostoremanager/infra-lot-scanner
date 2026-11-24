@@ -37,7 +37,6 @@ param tags object = {
 
 var keyVaultName = '${appName}-kv-${environment}'
 var functionAppName = '${appName}-func-${environment}'
-var functionAppServicePlanName = '${appName}-func-plan-${environment}'
 var storageAccountName = replace('${appName}stg${environment}', '-', '')
 var storageAccountNameLower = toLower(storageAccountName)
 var gamedbPostgresServerFqdn = '${gamedbAppName}-postgres-${environment}.postgres.database.azure.com'
@@ -98,64 +97,41 @@ resource jwtAuthenticationSecretKeySecret 'Microsoft.KeyVault/vaults/secrets@202
   }
 }
 
-// Function App Service Plan - Consumption, Windows.
-// Tried Linux Consumption first (2026-10-08/09) to work around Windows Consumption's
-// .NET 10 isolated-worker placeholder gap (IIS tried to specialize a
-// DOTNET-ISOLATED_8.0/6.0 placeholder and crashed immediately). That turned out to be
-// the wrong call: this subscription had NEVER run a Linux Consumption Function App
-// before, and every Linux attempt (including a fully isolated test in a different
-// region with a brand-new storage account, created via az functionapp create instead
-// of Bicep) failed identically -- ARM reports "Running" but every HTTP request 503s,
-// while this subscription's existing Windows Consumption apps (gamedb, mystore) all
-// respond instantly. Reverting to Windows, which is proven reliable here, and retrying
-// .NET 10 on Windows -- placeholder availability can change day to day, worth another
-// shot before giving up .NET 10 entirely. See project memory / git history for the
-// full investigation.
-resource functionAppServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
-  name: functionAppServicePlanName
-  location: location
-  tags: tags
-  kind: 'functionapp'
-  properties: {}
-  sku: {
-    name: 'Y1'
-    tier: 'Dynamic'
-  }
-}
-
-// Function App (.NET 10 isolated worker -- see fn-lot-scanner/fn-lot-scanner.csproj)
-resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
+// Function App -- Flex Consumption (Linux), provisioned OUT-OF-BAND via the Azure CLI,
+// NOT by this Bicep template. Migrated 2026-11-24 off classic Windows Consumption (Y1)
+// after that host runtime proved unable to reliably specialize .NET 9/10
+// isolated-worker apps on this subscription's scale unit (identical
+// FileNotFoundException crash on mystore-func-prod the same day, confirmed via
+// extensive live debugging to be a platform/host issue, not an app-level one -- see
+// infra-mystore's main.bicep history for the full investigation). This supersedes the
+// earlier (2026-10-08/09) Linux Consumption attempt noted below, which failed for
+// different reasons (every request 503'd despite "Running" state) -- Flex Consumption
+// is a separate, newer product line from classic Linux Consumption and is not subject
+// to that same failure.
+//
+// Flex Consumption's Bicep resource shape is comparatively immature and risks a
+// repeat outage if hand-rolled and subtly wrong, so the app and its Y1-era serverfarm
+// are intentionally NOT modeled as managed resources here anymore. To recreate it,
+// use recreate-flex-with-core-tools.yml (az functionapp create
+// --flexconsumption-location, then deploy code with `func azure functionapp publish`
+// -- classic zip-deploy methods including az functionapp deployment source
+// config-zip, az functionapp deploy, and Azure/functions-action all silently no-op
+// against Flex Consumption).
+resource functionApp 'Microsoft.Web/sites@2023-01-01' existing = {
   name: functionAppName
-  location: location
-  tags: tags
-  kind: 'functionapp'
-  properties: {
-    serverFarmId: functionAppServicePlan.id
-    siteConfig: {
-      cors: {
-        allowedOrigins: concat(['http://localhost:7071'], additionalCorsOrigins)
-        supportCredentials: false
-      }
-      http20Enabled: true
-      minTlsVersion: '1.2'
-    }
-    httpsOnly: true
-  }
-  identity: {
-    type: 'SystemAssigned'
-  }
 }
 
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storageAccountNameLower};EndpointSuffix=${az.environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
 
 var functionAppSettings = {
   AzureWebJobsStorage: storageConnectionString
-  // Windows Consumption content-sync settings -- required here (unlike Linux
-  // Consumption), matching infra-gamedb/infra-mystore's working pattern.
-  WEBSITE_CONTENTAZUREFILECONNECTIONSTRING: storageConnectionString
-  WEBSITE_CONTENTSHARE: toLower(functionAppName)
-  FUNCTIONS_EXTENSION_VERSION: '~4'
-  FUNCTIONS_WORKER_RUNTIME: 'dotnet-isolated'
+  // Flex Consumption rejects WEBSITE_CONTENTAZUREFILECONNECTIONSTRING,
+  // WEBSITE_CONTENTSHARE, FUNCTIONS_EXTENSION_VERSION, and FUNCTIONS_WORKER_RUNTIME as
+  // app settings outright ("invalid for Flex Consumption sites") -- those classic/
+  // Windows Consumption settings are no longer here for that reason. Deployment
+  // package location, runtime, and worker type are instead part of the Function App's
+  // functionAppConfig, set when the app is created (see
+  // recreate-flex-with-core-tools.yml).
   ASPNETCORE_ENVIRONMENT: environment
   ConnectionStrings__lotscanner: '@Microsoft.KeyVault(SecretUri=https://${keyVaultName}.vault.azure.net/secrets/LotScannerDbConnectionString/)'
   // Set directly rather than as a Key Vault reference -- isolated-worker Function Apps
