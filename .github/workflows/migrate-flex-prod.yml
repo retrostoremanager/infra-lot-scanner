@@ -83,7 +83,9 @@ jobs:
         with open('/tmp/current-settings.json') as f:
             settings = json.load(f)
         pairs = []
-        skip = {'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', 'WEBSITE_CONTENTSHARE', 'AzureWebJobsStorage'}
+        skip = {'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING', 'WEBSITE_CONTENTSHARE', 'AzureWebJobsStorage',
+                'WEBSITE_NODE_DEFAULT_VERSION', 'FUNCTIONS_WORKER_RUNTIME', 'FUNCTIONS_EXTENSION_VERSION',
+                'WEBSITE_RUN_FROM_PACKAGE'}
         for s in settings:
             if s['name'] in skip:
                 continue
